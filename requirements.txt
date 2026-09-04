@@ -1,4 +1,6 @@
 fastapi
 uvicorn[standard]
 python-multipart
-pymupdfgroq
+pymupdf
+groq
+python-dotenv
