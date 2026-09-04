@@ -4,4 +4,3 @@ python-multipart
 pymupdf
 groq
 python-dotenv
-sentence-transformers
