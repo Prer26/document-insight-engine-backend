@@ -17,7 +17,10 @@ from document_store import save_document, load_document
 # APP
 # ============================================================
 
-app = FastAPI(title="FindMe API")
+app = FastAPI(
+    title="FindMe API",
+    version="1.0.0",
+)
 
 
 # ============================================================
@@ -27,12 +30,12 @@ app = FastAPI(title="FindMe API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-    "http://localhost:8080",
-    "http://127.0.0.1:8080",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "https://document-insight-engine-frontend.vercel.app",
-],
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://document-insight-engine-frontend.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -54,7 +57,8 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 @app.get("/")
 def root():
     return {
-        "message": "FindMe backend is running"
+        "message": "FindMe backend is running",
+        "status": "ok",
     }
 
 
@@ -65,7 +69,7 @@ def root():
 @app.get("/health")
 def health():
     return {
-        "status": "ok"
+        "status": "ok",
     }
 
 
@@ -75,11 +79,17 @@ def health():
 
 def answer_is_unsupported(answer: str) -> bool:
     """
-    Detect when the LLM correctly says that the retrieved
-    document content does not contain enough information.
+    Detect whether the LLM is saying that the document
+    does not contain enough information to answer.
 
-    This prevents irrelevant retrieved chunks from being
-    displayed as citations/highlights.
+    This is important because retrieval may still return
+    semantically similar chunks even when the document
+    does not actually answer the user's question.
+
+    When an unsupported answer is detected, the API returns:
+        sources = []
+        no_answer = True
+        noAnswer = True
     """
 
     if not answer:
@@ -90,26 +100,90 @@ def answer_is_unsupported(answer: str) -> bool:
     )
 
     no_answer_phrases = [
+        # Generic inability to answer
         "i couldn't find the answer",
         "i could not find the answer",
+        "i don't have enough information",
+        "i do not have enough information",
+        "i can't answer",
+        "i cannot answer",
+        "i cannot provide an answer",
+        "i can't provide an answer",
+
+        # Document does not contain information
         "the document does not contain enough information",
+        "the document doesn't contain enough information",
+        "the document does not contain any information",
+        "the document doesn't contain any information",
+        "the document does not contain information",
+        "the document doesn't contain information",
+        "the document does not contain any information about",
+        "the document doesn't contain any information about",
+        "the document does not contain information about",
+        "the document doesn't contain information about",
+        "the document contains no information about",
+
+        # Document does not provide information
         "the document does not provide information",
+        "the document doesn't provide information",
+        "the document does not provide any information",
+        "the document doesn't provide any information",
+        "the document does not provide information about",
+        "the document doesn't provide information about",
+
+        # Sources do not support answer
         "the provided sources do not contain",
+        "the provided sources don't contain",
         "the provided sources do not provide",
+        "the provided sources don't provide",
+        "the provided sources contain no information",
+
         "the sources do not contain",
+        "the sources don't contain",
         "the sources do not provide",
+        "the sources don't provide",
+        "the sources contain no information",
+
+        # Insufficient information
         "there is not enough information",
         "there isn't enough information",
+        "there is insufficient information",
+        "there isn't sufficient information",
         "not enough information to answer",
+        "insufficient information to answer",
+
+        # Cannot answer from sources
         "cannot answer based on the provided sources",
         "can't answer based on the provided sources",
         "cannot be answered from the provided sources",
         "can't be answered from the provided sources",
+
+        "cannot answer based on the document",
+        "can't answer based on the document",
+        "cannot be answered from the document",
+        "can't be answered from the document",
+
+        # Answer absent
         "the answer is not present in the document",
+        "the answer is not in the document",
+        "the answer is not provided in the document",
         "the document does not contain the answer",
         "the document doesn't contain the answer",
+
+        # Answer cannot be determined
         "the answer cannot be determined from the document",
         "the answer can't be determined from the document",
+        "the answer cannot be determined",
+        "the answer can't be determined",
+
+        # Very common direct refusal pattern
+        "so i cannot answer that question",
+        "so i can't answer that question",
+        "therefore i cannot answer",
+        "therefore i can't answer",
+
+        # Short generic phrase
+        "no information about",
     ]
 
     return any(
@@ -119,26 +193,80 @@ def answer_is_unsupported(answer: str) -> bool:
 
 
 # ============================================================
+# HELPER: NO-ANSWER RESPONSE
+# ============================================================
+
+def no_answer_response(
+    question: str,
+    answer: str | None = None,
+):
+    """
+    Create a consistent no-answer response.
+
+    Both no_answer and noAnswer are returned so the backend
+    remains compatible with different frontend naming styles.
+    """
+
+    final_answer = (
+        answer.strip()
+        if isinstance(answer, str) and answer.strip()
+        else "The document does not contain enough information to answer this question."
+    )
+
+    return {
+        "question": question,
+        "answer": final_answer,
+        "sources": [],
+        "no_answer": True,
+        "noAnswer": True,
+    }
+
+
+# ============================================================
+# HELPER: SUCCESS RESPONSE
+# ============================================================
+
+def success_response(
+    question: str,
+    answer: str,
+    sources: list,
+):
+    """
+    Create a consistent successful answer response.
+    """
+
+    return {
+        "question": question,
+        "answer": answer,
+        "sources": sources,
+        "no_answer": False,
+        "noAnswer": False,
+    }
+
+
+# ============================================================
 # UPLOAD PDF
 # ============================================================
 
 @app.post("/upload")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(
+    file: UploadFile = File(...)
+):
     """
-    Upload a PDF, extract its pages/word coordinates,
-    create chunks and store the document.
+    Upload a PDF, extract its pages and word coordinates,
+    create searchable chunks, and store the document.
     """
 
     if not file.filename:
         raise HTTPException(
             status_code=400,
-            detail="No file was provided."
+            detail="No file was provided.",
         )
 
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(
             status_code=400,
-            detail="Only PDF files are supported."
+            detail="Only PDF files are supported.",
         )
 
     document_id = str(uuid.uuid4())
@@ -151,7 +279,6 @@ async def upload_pdf(file: UploadFile = File(...)):
     )
 
     try:
-
         # ----------------------------------------------------
         # Save uploaded PDF
         # ----------------------------------------------------
@@ -159,7 +286,7 @@ async def upload_pdf(file: UploadFile = File(...)):
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(
                 file.file,
-                buffer
+                buffer,
             )
 
         # ----------------------------------------------------
@@ -177,12 +304,12 @@ async def upload_pdf(file: UploadFile = File(...)):
 
         pages = result.get(
             "pages",
-            []
+            [],
         )
 
         page_count = result.get(
             "page_count",
-            len(pages)
+            len(pages),
         )
 
         # ----------------------------------------------------
@@ -200,16 +327,16 @@ async def upload_pdf(file: UploadFile = File(...)):
                 detail=(
                     "This PDF does not contain a readable text layer. "
                     "Scanned/image-only PDFs are not supported."
-                )
+                ),
             )
 
         # ----------------------------------------------------
-        # Create chunks
+        # Create searchable chunks
         # ----------------------------------------------------
 
         chunks = create_chunks(
             {
-                "pages": pages
+                "pages": pages,
             }
         )
 
@@ -219,11 +346,10 @@ async def upload_pdf(file: UploadFile = File(...)):
             )
 
         # ----------------------------------------------------
-        # Give every chunk an ID
+        # Give every chunk a unique ID
         # ----------------------------------------------------
 
         for index, chunk in enumerate(chunks):
-
             chunk["id"] = (
                 f"{document_id}_chunk_{index}"
             )
@@ -242,7 +368,7 @@ async def upload_pdf(file: UploadFile = File(...)):
 
         save_document(
             document_id,
-            document_data
+            document_data,
         )
 
         # ----------------------------------------------------
@@ -253,21 +379,21 @@ async def upload_pdf(file: UploadFile = File(...)):
             "document_id": document_id,
             "filename": safe_filename,
             "page_count": page_count,
-            "message": "PDF uploaded and processed successfully.",
+            "message": (
+                "PDF uploaded and processed successfully."
+            ),
         }
 
     except HTTPException:
         raise
 
     except Exception as e:
-
         raise HTTPException(
             status_code=500,
-            detail=f"Could not process PDF: {str(e)}"
+            detail=f"Could not process PDF: {str(e)}",
         )
 
     finally:
-
         try:
             file.file.close()
         except Exception:
@@ -279,8 +405,9 @@ async def upload_pdf(file: UploadFile = File(...)):
 # ============================================================
 
 @app.get("/documents/{document_id}")
-def get_document(document_id: str):
-
+def get_document(
+    document_id: str
+):
     document = load_document(
         document_id
     )
@@ -288,7 +415,7 @@ def get_document(document_id: str):
     if document is None:
         raise HTTPException(
             status_code=404,
-            detail="Document not found."
+            detail="Document not found.",
         )
 
     return document
@@ -299,47 +426,48 @@ def get_document(document_id: str):
 # ============================================================
 
 @app.post("/highlight")
-async def highlight_text(data: dict[str, Any]):
-
+async def highlight_text(
+    data: dict[str, Any]
+):
     page_words = data.get(
         "page_words",
-        []
+        [],
     )
 
     target_text = data.get(
         "text",
-        ""
+        "",
     )
 
     if not page_words:
         raise HTTPException(
             status_code=400,
-            detail="page_words are required."
+            detail="page_words are required.",
         )
 
     if not target_text:
         raise HTTPException(
             status_code=400,
-            detail="text is required."
+            detail="text is required.",
         )
 
     try:
-
         rectangles = find_highlight(
             page_words,
-            target_text
+            target_text,
         )
 
     except Exception as e:
-
         raise HTTPException(
             status_code=500,
-            detail=f"Highlight calculation failed: {str(e)}"
+            detail=(
+                f"Highlight calculation failed: {str(e)}"
+            ),
         )
 
     return {
         "found": bool(rectangles),
-        "rectangles": rectangles or []
+        "rectangles": rectangles or [],
     }
 
 
@@ -348,16 +476,39 @@ async def highlight_text(data: dict[str, Any]):
 # ============================================================
 
 @app.post("/ask")
-async def ask_question(data: dict[str, Any]):
+async def ask_question(
+    data: dict[str, Any]
+):
     """
-    Retrieve relevant chunks and generate an answer.
+    Retrieve relevant document chunks and generate a
+    grounded answer.
 
-    Important:
-    If the LLM determines that the retrieved document
-    content does not answer the question, we return
-    NO SOURCES. This prevents irrelevant page jumps
-    and random highlights.
+    Important behavior:
+
+    1. If nothing is retrieved:
+       -> no answer
+       -> no sources
+       -> no highlights
+
+    2. If the LLM says the document does not contain
+       the answer:
+       -> no answer
+       -> no sources
+       -> no highlights
+
+    3. If retrieved chunks cannot be mapped to actual
+       PDF coordinates:
+       -> no answer
+       -> no sources
+       -> no highlights
+
+    4. Only successfully highlighted chunks become
+       sources.
     """
+
+    # --------------------------------------------------------
+    # Read request
+    # --------------------------------------------------------
 
     document_id = data.get(
         "document_id"
@@ -374,13 +525,13 @@ async def ask_question(data: dict[str, Any]):
     if not document_id:
         raise HTTPException(
             status_code=400,
-            detail="document_id is required."
+            detail="document_id is required.",
         )
 
     if not question:
         raise HTTPException(
             status_code=400,
-            detail="question is required."
+            detail="question is required.",
         )
 
     question = str(question).strip()
@@ -388,7 +539,7 @@ async def ask_question(data: dict[str, Any]):
     if not question:
         raise HTTPException(
             status_code=400,
-            detail="question cannot be empty."
+            detail="question cannot be empty.",
         )
 
     # --------------------------------------------------------
@@ -402,7 +553,7 @@ async def ask_question(data: dict[str, Any]):
     if document is None:
         raise HTTPException(
             status_code=404,
-            detail="Document not found."
+            detail="Document not found.",
         )
 
     # --------------------------------------------------------
@@ -410,18 +561,18 @@ async def ask_question(data: dict[str, Any]):
     # --------------------------------------------------------
 
     try:
-
         results = search_document(
             document,
             question,
-            top_k=5
+            top_k=5,
         )
 
     except Exception as e:
-
         raise HTTPException(
             status_code=500,
-            detail=f"Document search failed: {str(e)}"
+            detail=(
+                f"Document search failed: {str(e)}"
+            ),
         )
 
     # --------------------------------------------------------
@@ -429,50 +580,44 @@ async def ask_question(data: dict[str, Any]):
     # --------------------------------------------------------
 
     if not results:
-
-        return {
-            "question": question,
-            "answer": (
-                "I couldn't find the answer in the document."
-            ),
-            "sources": [],
-            "no_answer": True,
-        }
+        return no_answer_response(
+            question,
+            "I couldn't find the answer in the document.",
+        )
 
     # --------------------------------------------------------
-    # Generate answer
+    # Generate grounded answer
     # --------------------------------------------------------
 
     try:
-
         answer = generate_answer(
             question,
-            results
+            results,
         )
 
     except Exception as e:
-
         raise HTTPException(
             status_code=500,
-            detail=f"Answer generation failed: {str(e)}"
+            detail=(
+                f"Answer generation failed: {str(e)}"
+            ),
         )
 
+    answer = (
+        str(answer).strip()
+        if answer is not None
+        else ""
+    )
+
     # --------------------------------------------------------
-    # CRITICAL:
-    # Check whether LLM says answer is unsupported
+    # CRITICAL NO-ANSWER CHECK
     # --------------------------------------------------------
 
     if answer_is_unsupported(answer):
-
-        return {
-            "question": question,
-            "answer": (
-                "The document does not contain enough information "
-                "to answer this question."
-            ),
-            "sources": [],
-            "no_answer": True,
-        }
+        return no_answer_response(
+            question,
+            answer,
+        )
 
     # --------------------------------------------------------
     # Build valid sources
@@ -484,29 +629,32 @@ async def ask_question(data: dict[str, Any]):
 
         words = result.get(
             "words",
-            []
+            [],
         )
 
+        if not words:
+            continue
+
         # ----------------------------------------------------
-        # Calculate highlight rectangles
+        # Calculate actual PDF highlight coordinates
         # ----------------------------------------------------
 
         rectangles = []
 
-        if words:
+        try:
+            rectangles = find_highlight(
+                words,
+                result.get(
+                    "text",
+                    "",
+                ),
+            )
 
-            try:
-
-                rectangles = find_highlight(
-                    words,
-                    result.get("text", "")
-                )
-
-            except Exception:
-                rectangles = []
+        except Exception:
+            rectangles = []
 
         # ----------------------------------------------------
-        # Only return sources that have actual coordinates
+        # Only accept sources with real coordinates
         # ----------------------------------------------------
 
         if not rectangles:
@@ -520,7 +668,7 @@ async def ask_question(data: dict[str, Any]):
 
                 "page": result.get(
                     "page",
-                    1
+                    1,
                 ),
 
                 "chunkId": result.get(
@@ -529,27 +677,27 @@ async def ask_question(data: dict[str, Any]):
 
                 "text": result.get(
                     "text",
-                    ""
+                    "",
                 ),
 
                 "score": float(
                     result.get(
                         "score",
-                        0.0
+                        0.0,
                     )
                 ),
 
                 "semantic_score": float(
                     result.get(
                         "semantic_score",
-                        0.0
+                        0.0,
                     )
                 ),
 
                 "keyword_score": float(
                     result.get(
                         "keyword_score",
-                        0.0
+                        0.0,
                     )
                 ),
 
@@ -560,36 +708,28 @@ async def ask_question(data: dict[str, Any]):
         )
 
     # --------------------------------------------------------
-    # If answer exists but no source can actually be
-    # highlighted, do NOT show fake citations.
+    # CRITICAL: Answer without valid highlights
     # --------------------------------------------------------
 
     if not sources:
-
-        return {
-            "question": question,
-            "answer": (
-                "The document does not contain enough information "
-                "to answer this question."
-            ),
-            "sources": [],
-            "no_answer": True,
-        }
+        return no_answer_response(
+            question,
+            "The document does not contain enough information to answer this question.",
+        )
 
     # --------------------------------------------------------
-    # Final response
+    # Successful grounded answer
     # --------------------------------------------------------
 
-    return {
-        "question": question,
-        "answer": answer,
-        "sources": sources,
-        "no_answer": False,
-    }
+    return success_response(
+        question,
+        answer,
+        sources,
+    )
 
 
 # ============================================================
-# RUN
+# RUN LOCAL SERVER
 # ============================================================
 
 if __name__ == "__main__":
